@@ -1,0 +1,106 @@
+"""
+Загрузка дообученной модели Qwen3 и инференс.
+Базовая модель: unsloth/qwen3-4b-unsloth-bnb-4bit.
+Адаптер (LoRA): из папки qwen3-style-model, если там есть adapter_config.json.
+"""
+import os
+from pathlib import Path
+
+# Кэш Hugging Face в папке проекта (избегаем PermissionError в ~/.cache)
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+HF_CACHE_DIR = _PROJECT_ROOT / ".cache" / "huggingface"
+HF_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("HF_HOME", str(HF_CACHE_DIR))
+os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(HF_CACHE_DIR))
+
+from transformers import AutoModelForCausalLM, AutoTokenizer
+import torch
+
+# Базовая модель из README чекпоинта
+BASE_MODEL_ID = "unsloth/qwen3-4b-unsloth-bnb-4bit"
+
+# Папка с дообученным адаптером и токенизатором
+MODEL_DIR = Path(__file__).resolve().parent / "qwen3-style-model"
+
+
+def _adapter_present() -> bool:
+    return (MODEL_DIR / "adapter_config.json").exists()
+
+
+def load_tokenizer():
+    """Загружает токенизатор базовой модели (тот же, что и у адаптера)."""
+    return AutoTokenizer.from_pretrained(
+        BASE_MODEL_ID,
+        trust_remote_code=True,
+        cache_dir=str(HF_CACHE_DIR),
+    )
+
+
+def load_model(device_map: str = "auto"):
+    """
+    Загружает модель: базу с Hub и при наличии — PEFT-адаптер из qwen3_style_model.
+    """
+    tokenizer = load_tokenizer()
+    model = AutoModelForCausalLM.from_pretrained(
+        BASE_MODEL_ID,
+        torch_dtype=torch.bfloat16,
+        device_map=device_map,
+        trust_remote_code=True,
+        cache_dir=str(HF_CACHE_DIR),
+    )
+
+    if _adapter_present():
+        from peft import PeftModel
+        model = PeftModel.from_pretrained(model, str(MODEL_DIR))
+        model.eval()
+    else:
+        model.eval()
+
+    return model, tokenizer
+
+
+def generate_article(
+    model,
+    tokenizer,
+    topic: str,
+    word_count: int,
+    max_new_tokens: int = 2048,
+    temperature: float = 0.7,
+    do_sample: bool = True,
+) -> str:
+    """
+    Генерирует статью по теме и ориентиру по количеству слов.
+
+    topic: содержание/тема статьи
+    word_count: ориентировочное количество слов
+    """
+    prompt = (
+        f"Напиши статью на тему: {topic}\n"
+        f"Ориентировочный объём: примерно {word_count} слов. Пиши развёрнуто и по делу."
+    )
+    messages = [{"role": "user", "content": prompt}]
+
+    text = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+    inputs = tokenizer(text, return_tensors="pt").to(model.device)
+
+    with torch.no_grad():
+        output_ids = model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            do_sample=do_sample,
+            pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
+        )
+
+    # Декодируем только сгенерированную часть
+    new_ids = output_ids[0][inputs.input_ids.shape[1] :].tolist()
+    answer = tokenizer.decode(new_ids, skip_special_tokens=True)
+
+    # Обрезаем по первому стоп-токену или лишнему префиксу
+    if "<|im_end|>" in answer:
+        answer = answer.split("<|im_end|>")[0].strip()
+    return answer.strip()
