@@ -19,12 +19,22 @@ import torch
 # Базовая модель из README чекпоинта
 BASE_MODEL_ID = "unsloth/qwen3-4b-unsloth-bnb-4bit"
 
-# Папка с дообученным адаптером и токенизатором
-MODEL_DIR = Path(__file__).resolve().parent / "qwen3-style-model"
+# Возможные имена папки с адаптером (поддержка qwen3-style-model и qwen3_style_model)
+_WRITER_DIR = Path(__file__).resolve().parent
+_ADAPTER_FOLDER_NAMES = ("qwen3-style-model", "qwen3_style_model")
+
+
+def _get_adapter_dir() -> Path:
+    """Папка с дообученным адаптером (та, в которой есть adapter_config.json)."""
+    for name in _ADAPTER_FOLDER_NAMES:
+        p = (_WRITER_DIR / name).resolve()
+        if (p / "adapter_config.json").exists():
+            return p
+    return (_WRITER_DIR / _ADAPTER_FOLDER_NAMES[0]).resolve()
 
 
 def _adapter_present() -> bool:
-    return (MODEL_DIR / "adapter_config.json").exists()
+    return (_get_adapter_dir() / "adapter_config.json").exists()
 
 
 def load_tokenizer():
@@ -51,7 +61,8 @@ def load_model(device_map: str = "auto"):
 
     if _adapter_present():
         from peft import PeftModel
-        model = PeftModel.from_pretrained(model, str(MODEL_DIR))
+        adapter_path = str(_get_adapter_dir())
+        model = PeftModel.from_pretrained(model, adapter_path, local_files_only=True)
         model.eval()
     else:
         model.eval()
