@@ -49,12 +49,25 @@ def load_tokenizer():
 def load_model(device_map: str = "auto"):
     """
     Загружает модель: базу с Hub и при наличии — PEFT-адаптер из qwen3_style_model.
+    При нехватке VRAM часть слоёв выгружается на CPU (max_memory).
     """
     tokenizer = load_tokenizer()
+    # Разрешаем выгрузку части модели на CPU при нехватке VRAM (ноутбуки 8 GB и т.п.)
+    n_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    if n_gpus > 0:
+        max_memory = {}
+        for i in range(n_gpus):
+            vram_gb = torch.cuda.get_device_properties(i).total_memory / (1024**3)
+            # Оставляем ~1.5 GB запаса на GPU, остальное может уехать на CPU
+            max_memory[i] = f"{max(4, int(vram_gb - 1.5))}GiB"
+        max_memory["cpu"] = "20GiB"
+    else:
+        max_memory = None
     model = AutoModelForCausalLM.from_pretrained(
         BASE_MODEL_ID,
         torch_dtype=torch.bfloat16,
         device_map=device_map,
+        max_memory=max_memory,
         trust_remote_code=True,
         cache_dir=str(HF_CACHE_DIR),
     )
